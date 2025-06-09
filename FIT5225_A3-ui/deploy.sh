@@ -92,69 +92,71 @@ if ! check_resource "DynamoDB table" "$TABLE_NAME" "aws dynamodb describe-table 
     echo -e "${GREEN}✅ DynamoDB table created: $TABLE_NAME${NC}"
 fi
 
+
 # Create IAM role
 echo -e "\n${BLUE}🔐 Creating IAM Role...${NC}"
 ROLE_NAME="bird-detection-lambda-role"
 if ! check_resource "IAM role" "$ROLE_NAME" "aws iam get-role --role-name $ROLE_NAME"; then
-    # Create trust policy
+
+    # 先检查是否有权限 iam:CreateRole
+    echo -e "${BLUE}🔍 Checking IAM create-role permissions...${NC}"
+    set +e
+    aws iam create-role --role-name dummy-role-for-check \
+        --assume-role-policy-document '{"Version":"2012-10-17","Statement":[]}' \
+        &> /tmp/iam-perm-check.log
+    PERM_EXIT=$?
+    aws iam delete-role --role-name dummy-role-for-check &> /dev/null
+    set -e
+
+    if [ $PERM_EXIT -ne 0 ]; then
+        echo -e "${RED}❌ 当前身份无 iam:CreateRole 或 iam:PassRole 权限，无法自动创建 IAM Role${NC}"
+        echo -e "${YELLOW}⚠️  请按照以下任一方式解决：${NC}"
+        echo -e "  • 让管理员为你创建名为 '${ROLE_NAME}' 的 Role，并附上 Lambda 信任策略 + 执行策略。"
+        echo -e "  • 或为当前角色授予 iam:CreateRole、iam:AttachRolePolicy 与 iam:PassRole 权限，然后重试脚本。"
+        exit 1
+    fi
+
     cat > /tmp/lambda-trust-policy.json << EOF
 {
   "Version": "2012-10-17",
   "Statement": [
     {
       "Effect": "Allow",
-      "Principal": {
-        "Service": "lambda.amazonaws.com"
-      },
+      "Principal": { "Service": "lambda.amazonaws.com" },
       "Action": "sts:AssumeRole"
     }
   ]
 }
 EOF
 
-    # Create IAM role
     aws iam create-role \
         --role-name $ROLE_NAME \
         --assume-role-policy-document file:///tmp/lambda-trust-policy.json
 
-    # Create permission policy
+    
     cat > /tmp/lambda-permissions.json << EOF
 {
-    "Version": "2012-10-17",
-    "Statement": [
-        {
-            "Effect": "Allow",
-            "Action": [
-                "logs:CreateLogGroup",
-                "logs:CreateLogStream",
-                "logs:PutLogEvents"
-            ],
-            "Resource": "arn:aws:logs:*:*:*"
-        },
-        {
-            "Effect": "Allow",
-            "Action": [
-                "s3:GetObject",
-                "s3:PutObject",
-                "s3:DeleteObject"
-            ],
-            "Resource": "arn:aws:s3:::$BUCKET_NAME/*"
-        },
-        {
-            "Effect": "Allow",
-            "Action": [
-                "dynamodb:PutItem",
-                "dynamodb:GetItem",
-                "dynamodb:UpdateItem",
-                "dynamodb:DeleteItem"
-            ],
-            "Resource": "arn:aws:dynamodb:$REGION:*:table/$TABLE_NAME"
-        }
-    ]
+  "Version":"2012-10-17",
+  "Statement":[
+    {
+      "Effect":"Allow",
+      "Action":["logs:CreateLogGroup","logs:CreateLogStream","logs:PutLogEvents"],
+      "Resource":"arn:aws:logs:*:*:*"
+    },
+    {
+      "Effect":"Allow",
+      "Action":["s3:GetObject","s3:PutObject","s3:DeleteObject"],
+      "Resource":"arn:aws:s3:::$BUCKET_NAME/*"
+    },
+    {
+      "Effect":"Allow",
+      "Action":["dynamodb:PutItem","dynamodb:GetItem","dynamodb:UpdateItem","dynamodb:DeleteItem"],
+      "Resource":"arn:aws:dynamodb:$REGION:*:table/$TABLE_NAME"
+    }
+  ]
 }
 EOF
 
-    # Attach policies
     aws iam put-role-policy \
         --role-name $ROLE_NAME \
         --policy-name bird-detection-lambda-permissions \
@@ -165,13 +167,13 @@ EOF
         --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
 
     echo -e "${GREEN}✅ IAM role created: $ROLE_NAME${NC}"
-    
-    # Wait for role to propagate
     echo -e "${YELLOW}⏳ Waiting for IAM role to propagate...${NC}"
     sleep 10
 fi
 
 ROLE_ARN="arn:aws:iam::$ACCOUNT_ID:role/$ROLE_NAME"
+
+
 
 # Deploy Upload Lambda Function
 echo -e "\n${BLUE}⚡ Deploying Upload Lambda Function...${NC}"
